@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import logging
 import json
 import urllib2
@@ -17,6 +19,9 @@ from oaipmh.metadata import MetadataRegistry
 
 from metadata import oai_ddi_reader
 from metadata import oai_dc_reader
+
+from ckan.lib.base import c
+import re
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +69,7 @@ class OaipmhHarvester(HarvesterBase):
             )
 
             client.identify()  # check if identify works
-            for header in self._identifier_generator(client):
+            for index, header in enumerate(self._identifier_generator(client)):
                 harvest_obj = HarvestObject(
                     guid=header.identifier(),
                     job=harvest_job
@@ -72,6 +77,8 @@ class OaipmhHarvester(HarvesterBase):
                 harvest_obj.save()
                 harvest_obj_ids.append(harvest_obj.id)
                 log.debug("Harvest obj %s created" % harvest_obj.id)
+                #if index == 5:
+                # test with a few records
         except urllib2.HTTPError, e:
             log.exception(
                 'Gather stage failed on %s (%s): %s, %s'
@@ -207,7 +214,7 @@ class OaipmhHarvester(HarvesterBase):
                 content_dict['set_spec'] = header.setSpec()
                 if metadata_modified:
                     content_dict['metadata_modified'] = metadata_modified
-                log.debug(content_dict)
+                #log.debug(content_dict)
                 content = json.dumps(content_dict)
             except:
                 log.exception('Dumping the metadata failed!')
@@ -261,7 +268,8 @@ class OaipmhHarvester(HarvesterBase):
             log.error('No harvest object received')
             self._save_object_error('No harvest object received')
             return False
-
+        #if c.userobj and c.userobj.Session.object_session(c.userobj) and c.userobj.name == 'harvest':
+        #    user = c.userobj
         try:
             self._set_config(harvest_object.job.source.config)
             context = {
@@ -273,7 +281,7 @@ class OaipmhHarvester(HarvesterBase):
 
             package_dict = {}
             content = json.loads(harvest_object.content)
-            log.debug(content)
+            #log.debug("Content is: %s", content)
 
             package_dict['id'] = munge_title_to_name(harvest_object.guid)
             package_dict['name'] = package_dict['id']
@@ -307,28 +315,56 @@ class OaipmhHarvester(HarvesterBase):
             # extract tags from 'type' and 'subject' field
             # everything else is added as extra field
             tags, extras = self._extract_tags_and_extras(content)
+            if not content['description']:
+                package_dict['notes'] = u'There is no description'
+            
             package_dict['tags'] = tags
+	        #format tags correctly (list of dicts)
+            tags_dict = []
+            for kw in package_dict['tags']: 
+            	tag = {'state':'active'}
+            	tag['name'] = kw
+            	tags_dict.append(tag)
+            package_dict['tags'] = tags_dict
             package_dict['extras'] = extras
+            
+
+	        #format extras correctly (list of dicts)
+            extras_dict = []
+            for key,value in package_dict['extras']: 
+            	extra = {'state':'active'}
+            	extra['key'] = key
+                extra['value'] = value
+            	extras_dict.append(extra)
+
+	        package_dict['extras'] = extras_dict
+
+            # set to public 	
+            package_dict['private'] = False
+		
+            #convert corresponding fields to datacite
+            package_dict = self.convert_to_datacite(package_dict)
 
             # groups aka projects
             groups = []
 
             # create group based on set
-            if content['set_spec']:
-                log.debug('set_spec: %s' % content['set_spec'])
-                groups.extend(
-                    self._find_or_create_groups(
-                        content['set_spec'],
-                        context.copy()
-                    )
-                )
+            #if content['set_spec']:
+            #    log.debug('set_spec: %s' % content['set_spec'])
+            #    groups.extend(
+            #        self._find_or_create_groups(
+            #            content['set_spec'],
+            #            context.copy()
+            #        )
+            #    )
 
             # add groups from content
-            groups.extend(
-                self._extract_groups(content, context.copy())
-            )
+            #groups.extend(
+            #    self._extract_groups(content, context.copy())
+            #)
 
-            package_dict['groups'] = groups
+            #package_dict['groups'] = groups
+
 
             # allow sub-classes to add additional fields
             package_dict = self._extract_additional_fields(
@@ -336,10 +372,13 @@ class OaipmhHarvester(HarvesterBase):
                 package_dict
             )
 
-            log.debug('Create/update package using dict: %s' % package_dict)
+            #log.debug('Create/update package using dict: %s' % package_dict)
+
+
             self._create_or_update_package(
                 package_dict,
-                harvest_object
+                harvest_object,
+                package_dict_form='package_show'
             )
 
             Session.commit()
@@ -376,9 +415,11 @@ class OaipmhHarvester(HarvesterBase):
         extras = []
         tags = []
         for key, value in content.iteritems():
+	    
             if key in self._get_mapping().values():
                 continue
             if key in ['type', 'subject']:
+                #log.debug('Key is %s, value is %s,  type is %s', key, value, type(value))
                 if type(value) is list:
                     tags.extend(value)
                 else:
@@ -399,9 +440,10 @@ class OaipmhHarvester(HarvesterBase):
                     continue
 
             extras.append((key, value))
-
-        tags = [munge_tag(tag[:100]) for tag in tags]
-
+        #tags = [munge_tag(tag[:100]) for tag in tags]
+        # keep ckan permitted characters for tags (letters and -. )
+        re_strip = re.compile(u'[^\u0061-\u007a\u0041-\u005a\u0370-\u03ff\u1f00-\u1fff\u0030-\u0039\-. ]')
+        tags = [re.sub(re_strip, '*', tag[:100],re.UNICODE).replace('*', '-') for tag in tags]
         return (tags, extras)
 
     def _get_possible_resource(self, harvest_obj, content):
@@ -419,7 +461,7 @@ class OaipmhHarvester(HarvesterBase):
         log.debug('URL of ressource: %s' % url)
         if url:
             try:
-                resource_format = content['format'][0]
+                resource_format = content['format'][-1]
             except (IndexError, KeyError):
                 resource_format = 'HTML'
             resources.append({
@@ -462,3 +504,38 @@ class OaipmhHarvester(HarvesterBase):
 
         log.debug('Group ids: %s' % group_ids)
         return group_ids
+
+    def convert_to_datacite(self, pkg_dict):
+
+        pkg_dict['dataset_type'] = 'datacite'
+        pkg_dict['type'] = 'dataset'
+        datacite_dict = {}
+        for extra in pkg_dict['extras'][:]:
+            if not extra['value']: 
+                pkg_dict['extras'].remove(extra)
+            elif extra['key'] == 'creator':
+                pkg_dict['datacite.creator.creator_name'] = extra['value']
+                pkg_dict['extras'].remove(extra)
+            elif extra['key'] == 'relation':
+                if extra['value']: 
+                    pkg_dict['datacite.related_publication'] =  extra['value']
+                pkg_dict['extras'].remove(extra)
+            elif extra['key'] == 'author':
+                pkg_dict['author'] = extra['value']
+                pkg_dict['extras'].remove(extra)
+            elif extra['key'] == 'date':
+                pkg_dict['date'] = extra['value']
+                pkg_dict['extras'].remove(extra)
+            elif extra['key'] == 'language':
+                if extra['value'] == 'el':
+                    extra['value']= 'gre'
+                pkg_dict['datacite.languagecode'] = extra['value']
+                pkg_dict['extras'].remove(extra) 
+            elif extra['key'] == 'identifier':
+                pkg_dict['datacite.source'] = extra['value']
+                pkg_dict['extras'].remove(extra) 
+        pkg_dict['datacite.closed_subject'] = ['Other Studies in Human Society']
+        pkg_dict['closed_tag'] = ['Other Studies in Human Society']
+        pkg_dict['datacite.contact_email'] = 'placeholder@mail.com'
+        
+        return pkg_dict
